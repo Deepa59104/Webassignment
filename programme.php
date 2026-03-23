@@ -1,190 +1,177 @@
 <?php
-// Start session and check admin is logged in
-session_start();
-if (!isset($_SESSION['admin_id'])) { header('Location: login.php'); exit; }
+error_reporting(0);
+ini_set('display_errors', 0);
+require 'Includes/db.php';
 
-// Include database connection
-require '../Includes/db.php';
+// Get programme ID from URL
+$id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
 
-$message = '';
+// Get programme details from database
+$stmt = $pdo->prepare("SELECT * FROM programmes WHERE id = ?");
+$stmt->execute([$id]);
+$programme = $stmt->fetch(PDO::FETCH_ASSOC);
 
-// Handle DELETE request - remove a programme by ID
-if (isset($_GET['delete'])) {
-    $stmt = $pdo->prepare("DELETE FROM programmes WHERE id = ?");
-    $stmt->execute([(int)$_GET['delete']]);
-    $message = 'Programme deleted successfully.';
-}
+// Get all modules for this programme with staff name
+// Using staff_id directly from modules table
+$stmt2 = $pdo->prepare("
+    SELECT m.*, s.name as staff_name
+    FROM modules m
+    JOIN programme_modules pm ON pm.module_id = m.id
+    LEFT JOIN staff s ON s.id = m.staff_id
+    WHERE pm.programme_id = ?
+    ORDER BY m.year
+");
+$stmt2->execute([$id]);
+$modules = $stmt2->fetchAll(PDO::FETCH_ASSOC);
 
-// Handle TOGGLE publish/unpublish request
-if (isset($_GET['toggle'])) {
-    $stmt = $pdo->prepare("UPDATE programmes SET published = NOT published WHERE id = ?");
-    $stmt->execute([(int)$_GET['toggle']]);
-    header('Location: programmes.php');
-    exit;
-}
-
-// Handle ADD or EDIT form submission
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-
-    // Sanitize all inputs to prevent XSS
-    $title       = htmlspecialchars(trim($_POST['title']), ENT_QUOTES, 'UTF-8');
-    $description = htmlspecialchars(trim($_POST['description']), ENT_QUOTES, 'UTF-8');
-    $level       = $_POST['level'];
-    $image       = htmlspecialchars(trim($_POST['image']), ENT_QUOTES, 'UTF-8');
-    $published   = isset($_POST['published']) ? 1 : 0;
-    $id          = (int)$_POST['id'];
-
-    if ($id > 0) {
-        // Update existing programme
-        $stmt = $pdo->prepare("UPDATE programmes SET title=?, description=?, level=?, image=?, published=? WHERE id=?");
-        $stmt->execute([$title, $description, $level, $image, $published, $id]);
-        $message = 'Programme updated successfully.';
-    } else {
-        // Insert new programme
-        $stmt = $pdo->prepare("INSERT INTO programmes (title, description, level, image, published) VALUES (?,?,?,?,?)");
-        $stmt->execute([$title, $description, $level, $image, $published]);
-        $message = 'Programme added successfully.';
-    }
-    header('Location: programmes.php');
-    exit;
-}
-
-// Load programme data if editing
-$edit = null;
-if (isset($_GET['edit'])) {
-    $stmt = $pdo->prepare("SELECT * FROM programmes WHERE id = ?");
-    $stmt->execute([(int)$_GET['edit']]);
-    $edit = $stmt->fetch(PDO::FETCH_ASSOC);
-}
-
-// Fetch all programmes from database
-$programmes = $pdo->query("SELECT * FROM programmes ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
+// Person 4 feature - Get shared modules
+// Find modules that appear in MORE than one programme
+$stmt3 = $pdo->prepare("
+    SELECT m.id, m.name, m.description,
+           GROUP_CONCAT(p.title SEPARATOR ', ') as shared_with,
+           COUNT(pm.programme_id) as programme_count
+    FROM modules m
+    JOIN programme_modules pm ON m.id = pm.module_id
+    JOIN programmes p ON pm.programme_id = p.id
+    WHERE m.id IN (
+        SELECT module_id FROM programme_modules WHERE programme_id = ?
+    )
+    GROUP BY m.id
+    HAVING programme_count > 1
+    ORDER BY m.name
+");
+$stmt3->execute([$id]);
+$shared_modules = $stmt3->fetchAll(PDO::FETCH_ASSOC);
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Manage Programmes</title>
+    <title><?php echo htmlspecialchars($programme['title'] ?? 'Programme'); ?> - Student Course Hub</title>
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: Arial, sans-serif; background: #f0f2f5; }
-        nav { background: #1a1a2e; padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; }
-        nav h1 { color: white; font-size: 1.1rem; }
-        nav a { color: #ccc; text-decoration: none; margin-left: 1.5rem; font-size: 0.9rem; }
-        nav a:hover { color: white; }
-        .container { padding: 2rem; }
-        h2 { color: #1a1a2e; margin-bottom: 1rem; }
-        .success { background: #d4edda; color: #155724; padding: 0.7rem 1rem; border-radius: 5px; margin-bottom: 1rem; }
-        form { background: white; padding: 1.5rem; border-radius: 10px; margin-bottom: 2rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
-        form h3 { margin-bottom: 1rem; color: #1a1a2e; }
-        label { display: block; margin-bottom: 0.3rem; font-size: 0.9rem; color: #444; }
-        input[type=text], textarea, select { width: 100%; padding: 0.6rem; margin-bottom: 1rem; border: 1px solid #ccc; border-radius: 5px; font-size: 0.95rem; }
-        textarea { height: 80px; resize: vertical; }
-        .form-row { display: flex; gap: 1rem; flex-wrap: wrap; }
-        .form-row > div { flex: 1; }
-        button[type=submit] { background: #1a1a2e; color: white; padding: 0.7rem 1.5rem; border: none; border-radius: 5px; cursor: pointer; }
-        button[type=submit]:hover { background: #16213e; }
-        table { width: 100%; border-collapse: collapse; background: white; border-radius: 10px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
-        th { background: #1a1a2e; color: white; padding: 0.8rem 1rem; text-align: left; font-size: 0.9rem; }
-        td { padding: 0.8rem 1rem; border-bottom: 1px solid #eee; font-size: 0.9rem; }
-        .badge { padding: 0.3rem 0.7rem; border-radius: 20px; font-size: 0.8rem; font-weight: bold; }
-        .published { background: #d4edda; color: #155724; }
-        .unpublished { background: #f8d7da; color: #721c24; }
-        .actions a { margin-right: 0.5rem; text-decoration: none; font-size: 0.85rem; padding: 0.3rem 0.7rem; border-radius: 4px; }
-        .btn-edit { background: #ffc107; color: #333; }
-        .btn-delete { background: #dc3545; color: white; }
-        .btn-toggle { background: #17a2b8; color: white; }
+        /* Basic reset */
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; background: #f4f4f4; }
+
+        /* Accessibility focus styles - WCAG2 */
+        a:focus, button:focus, input:focus { outline: 3px solid #ffbf00; }
+
+        /* Header */
+        header { background: #003366; color: white; padding: 20px; text-align: center; }
+
+        /* Main content */
+        main { max-width: 900px; margin: 30px auto; padding: 0 20px; }
+
+        /* Back link */
+        .back { color: #003366; text-decoration: none; display: block; margin-bottom: 15px; }
+
+        /* Card style for sections */
+        .card { background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 6px rgba(0,0,0,0.1); }
+
+        /* Headings */
+        h2 { color: #003366; margin-bottom: 10px; }
+        h3 { color: #003366; margin: 15px 0 8px; }
+
+        /* Level badge */
+        .level { background: #e0f0ff; color: #003366; padding: 3px 10px; border-radius: 20px; font-size: 13px; }
+
+        /* Register button */
+        .btn { display: inline-block; margin-top: 15px; background: #003366; color: white; padding: 10px 20px; border-radius: 5px; text-decoration: none; }
+        .btn:hover { background: #0055aa; }
+
+        /* Module card styling */
+        .module { background: #f9f9f9; border-left: 4px solid #003366; padding: 10px; margin-bottom: 8px; border-radius: 4px; }
+        .module small { color: #666; font-size: 12px; }
+
+        /* Shared module badge - Person 4 feature */
+        .shared-badge { background: #fff3cd; color: #856404; padding: 2px 8px; border-radius: 10px; font-size: 11px; margin-left: 8px; }
+
+        /* Shared modules section - Person 4 feature */
+        .shared-module { background: #fff8e1; border-left: 4px solid #ffc107; padding: 10px; margin-bottom: 8px; border-radius: 4px; }
+        .shared-module strong { color: #003366; }
+        .shared-module small { color: #666; font-size: 12px; display: block; margin-top: 4px; }
+        .shared-programmes { color: #856404; font-size: 12px; margin-top: 4px; }
+
+        /* Mobile friendly */
+        @media (max-width: 600px) { main { padding: 0 10px; } }
     </style>
 </head>
 <body>
-<!-- Navigation bar -->
-<nav>
-    <h1>Student Course Hub — Admin</h1>
-    <div>
-        <a href="dashboard.php">Dashboard</a>
-        <a href="programmes.php">Programmes</a>
-        <a href="modules.php">Modules</a>
-        <a href="mailing_list.php">Mailing List</a>
-        <a href="logout.php">Logout</a>
-    </div>
-</nav>
-<div class="container">
-    <h2>Manage Programmes</h2>
 
-    <!-- Success message after add/edit/delete -->
-    <?php if ($message): ?>
-        <div class="success"><?= $message ?></div>
+<!-- Header -->
+<header role="banner">
+    <h1>Student Course Hub</h1>
+</header>
+
+<main role="main">
+    <!-- Back to all programmes -->
+    <a href="index.php" class="back">← Back to Programmes</a>
+
+    <?php if ($programme): ?>
+
+    <!-- Programme details card -->
+    <div class="card">
+        <h2><?php echo htmlspecialchars($programme['title']); ?></h2>
+        <span class="level"><?php echo htmlspecialchars($programme['level']); ?></span>
+        <p style="margin-top:10px;"><?php echo htmlspecialchars($programme['description']); ?></p>
+        <!-- Register interest button -->
+        <a href="register_interest.php?id=<?php echo $programme['id']; ?>" class="btn">
+            Register Interest
+        </a>
+    </div>
+
+    <!-- Modules list card -->
+    <?php if (!empty($modules)): ?>
+    <div class="card">
+        <h2>Modules</h2>
+        <?php $year = 0; foreach ($modules as $m): ?>
+            <?php if ($m['year'] != $year): $year = $m['year']; ?>
+                <h3>Year <?php echo $year; ?></h3>
+            <?php endif; ?>
+            <div class="module">
+                <strong><?php echo htmlspecialchars($m['name']); ?></strong>
+                <!-- Show shared badge if module is in multiple programmes -->
+                <?php foreach ($shared_modules as $sm): ?>
+                    <?php if ($sm['id'] == $m['id']): ?>
+                        <span class="shared-badge">🔗 Shared Module</span>
+                    <?php endif; ?>
+                <?php endforeach; ?>
+                <br>
+                <!-- Show staff name if available -->
+                <small>👨‍🏫 <?php echo htmlspecialchars($m['staff_name'] ?? 'Not assigned'); ?></small>
+            </div>
+        <?php endforeach; ?>
+    </div>
     <?php endif; ?>
 
-    <!-- Add / Edit Programme Form -->
-    <form method="POST">
-        <h3><?= $edit ? 'Edit Programme' : 'Add New Programme' ?></h3>
-        <!-- Hidden ID - 0 means new, >0 means edit -->
-        <input type="hidden" name="id" value="<?= $edit['id'] ?? 0 ?>">
-        <label>Title</label>
-        <input type="text" name="title" value="<?= htmlspecialchars($edit['title'] ?? '') ?>" required>
-        <label>Description</label>
-        <textarea name="description"><?= htmlspecialchars($edit['description'] ?? '') ?></textarea>
-        <div class="form-row">
-            <div>
-                <!-- Dropdown for programme level -->
-                <label>Level</label>
-                <select name="level">
-                    <option value="Undergraduate" <?= ($edit['level'] ?? '') === 'Undergraduate' ? 'selected' : '' ?>>Undergraduate</option>
-                    <option value="Postgraduate" <?= ($edit['level'] ?? '') === 'Postgraduate' ? 'selected' : '' ?>>Postgraduate</option>
-                </select>
-            </div>
-            <div>
-                <label>Image filename (e.g. cs.jpg)</label>
-                <input type="text" name="image" value="<?= htmlspecialchars($edit['image'] ?? '') ?>">
-            </div>
+    <!-- Person 4 feature - Shared Modules Section -->
+    <?php if (!empty($shared_modules)): ?>
+    <div class="card">
+        <h2>🔗 Modules Shared With Other Programmes</h2>
+        <p style="color:#666; margin-bottom:15px; font-size:0.9rem;">
+            These modules are also taught in other programmes —
+            you may find similar content if you study these courses!
+        </p>
+        <?php foreach ($shared_modules as $sm): ?>
+        <div class="shared-module">
+            <strong><?php echo htmlspecialchars($sm['name']); ?></strong>
+            <?php if ($sm['description']): ?>
+                <small><?php echo htmlspecialchars($sm['description']); ?></small>
+            <?php endif; ?>
+            <!-- Show which other programmes share this module -->
+            <p class="shared-programmes">
+                📚 Also in: <?php echo htmlspecialchars($sm['shared_with']); ?>
+            </p>
         </div>
-        <!-- Checkbox to publish or unpublish -->
-        <label>
-            <input type="checkbox" name="published" value="1" <?= ($edit['published'] ?? 1) ? 'checked' : '' ?>>
-            Published
-        </label><br><br>
-        <button type="submit"><?= $edit ? 'Update Programme' : 'Add Programme' ?></button>
-        <?php if ($edit): ?>
-            <a href="programmes.php" style="margin-left:1rem; color:#666;">Cancel</a>
-        <?php endif; ?>
-    </form>
-
-    <!-- Table listing all programmes -->
-    <table>
-        <thead>
-            <tr>
-                <th>#</th>
-                <th>Title</th>
-                <th>Level</th>
-                <th>Status</th>
-                <th>Actions</th>
-            </tr>
-        </thead>
-        <tbody>
-        <!-- Loop through each programme -->
-        <?php foreach ($programmes as $p): ?>
-            <tr>
-                <td><?= $p['id'] ?></td>
-                <td><?= htmlspecialchars($p['title']) ?></td>
-                <td><?= $p['level'] ?></td>
-                <td>
-                    <!-- Published or unpublished badge -->
-                    <span class="badge <?= $p['published'] ? 'published' : 'unpublished' ?>">
-                        <?= $p['published'] ? 'Published' : 'Unpublished' ?>
-                    </span>
-                </td>
-                <td class="actions">
-                    <!-- Edit, toggle and delete buttons -->
-                    <a href="?edit=<?= $p['id'] ?>" class="btn-edit">Edit</a>
-                    <a href="?toggle=<?= $p['id'] ?>" class="btn-toggle"><?= $p['published'] ? 'Unpublish' : 'Publish' ?></a>
-                    <a href="?delete=<?= $p['id'] ?>" class="btn-delete" onclick="return confirm('Delete this programme?')">Delete</a>
-                </td>
-            </tr>
         <?php endforeach; ?>
-        </tbody>
-    </table>
-</div>
+    </div>
+    <?php endif; ?>
+
+    <?php else: ?>
+        <p>Programme not found!</p>
+    <?php endif; ?>
+
+</main>
 </body>
 </html>
